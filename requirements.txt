@@ -1,0 +1,16 @@
+# === AUTO AVISO - Dependencies ===
+
+# Chung
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0
+
+# Local Agent
+pygame>=2.5.0       # amthanh (phát cảnh báo captcha)
+
+# Server
+requests>=2.31.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+pytesseract>=0.3.10
