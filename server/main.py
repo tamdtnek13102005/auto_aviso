@@ -18,7 +18,7 @@ import os
 from .remote_adb import RemoteADB
 from .engine import BotEngine
 from .automation import AutomationController
-from .config import BASE_URL, AGENT_URL, TEMPLATES_DIR, API_ENDPOINTS
+from .config import BASE_URL, AGENT_URL, TEMPLATES_DIR, API_ENDPOINTS, AUTO_START_ON_BOOT
 
 # ============================================
 # LOGGING
@@ -52,6 +52,23 @@ app = FastAPI(
     version="1.0.0",
     description="Server điều khiển tự động hóa nhiệm vụ Aviso",
 )
+
+
+@app.on_event("startup")
+def startup_auto_run():
+    """Tự động bắt đầu automation khi server khởi động."""
+    if not AUTO_START_ON_BOOT:
+        logger.info("Auto-start đang tắt (AUTO_START_ON_BOOT=0)")
+        return
+
+    try:
+        result = controller.start()
+        if result.get("status") == "started":
+            logger.info("✅ Auto-start: automation đã bắt đầu")
+        else:
+            logger.warning(f"⚠️  Auto-start không bắt đầu được: {result}")
+    except Exception as e:
+        logger.error(f"❌ Auto-start gặp lỗi: {e}")
 
 app.add_middleware(
     CORSMiddleware,

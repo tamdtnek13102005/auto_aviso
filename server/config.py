@@ -18,6 +18,11 @@ SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
 SERVER_PORT = int(os.getenv("SERVER_PORT", "5000"))
 BASE_URL = os.getenv("BASE_URL", f"http://localhost:{SERVER_PORT}")
 
+# Tự động bắt đầu automation khi server khởi động
+AUTO_START_ON_BOOT = os.getenv("AUTO_START_ON_BOOT", "1").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+
 # ============================================
 # ĐƯỜNG DẪN
 # ============================================
@@ -109,6 +114,7 @@ def print_api_info():
     print("=" * 60)
     print(f"🌐 Base URL:    {BASE_URL}")
     print(f"📡 Agent URL:   {AGENT_URL}")
+    print(f"▶️  Auto start: {'ON' if AUTO_START_ON_BOOT else 'OFF'}")
     print(f"📂 Templates:   {TEMPLATES_DIR}")
     print(f"📖 API Docs:    {BASE_URL}/docs")
     print(f"📊 Dashboard:   {BASE_URL}/")
