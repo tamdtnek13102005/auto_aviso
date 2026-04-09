@@ -24,6 +24,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("local-agent")
 
+ADB_BIN = os.getenv("ADB_BIN", "adb")
+ADB_HEALTH_TIMEOUT = float(os.getenv("ADB_HEALTH_TIMEOUT", "12"))
+ADB_AUTOSTART_SERVER = os.getenv("ADB_AUTOSTART_SERVER", "1").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+
 app = FastAPI(title="Auto Aviso - Local Agent", version="1.0.0")
 
 app.add_middleware(
@@ -61,15 +67,45 @@ class KeyEventRequest(BaseModel):
 def health():
     """Kiểm tra agent có hoạt động + ADB có kết nối không"""
     try:
+        if ADB_AUTOSTART_SERVER:
+            # Khởi tạo adb daemon trước để giảm timeout giả khi lần gọi đầu.
+            subprocess.run(
+                [ADB_BIN, "start-server"],
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+
         result = subprocess.run(
-            ["adb", "devices"], capture_output=True, text=True, timeout=5
+            [ADB_BIN, "devices"],
+            capture_output=True,
+            text=True,
+            timeout=ADB_HEALTH_TIMEOUT,
         )
+
         lines = result.stdout.strip().split("\n")[1:]
-        devices = [l for l in lines if l.strip() and "device" in l]
+        devices = [l for l in lines if l.strip() and "\tdevice" in l]
+        unauthorized = [l for l in lines if l.strip() and "\tunauthorized" in l]
+        offline = [l for l in lines if l.strip() and "\toffline" in l]
+
         return {
             "status": "ok",
             "adb_connected": len(devices) > 0,
             "device_count": len(devices),
+            "unauthorized_count": len(unauthorized),
+            "offline_count": len(offline),
+        }
+    except FileNotFoundError:
+        return {
+            "status": "ok",
+            "adb_connected": False,
+            "error": f"ADB binary not found: {ADB_BIN}",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "ok",
+            "adb_connected": False,
+            "error": f"Command '{ADB_BIN} devices' timed out after {ADB_HEALTH_TIMEOUT:.1f} seconds",
         }
     except Exception as e:
         return {"status": "ok", "adb_connected": False, "error": str(e)}
@@ -80,7 +116,7 @@ def screenshot():
     """Chụp ảnh màn hình qua ADB → trả về PNG bytes"""
     try:
         p = subprocess.run(
-            ["adb", "exec-out", "screencap", "-p"],
+            [ADB_BIN, "exec-out", "screencap", "-p"],
             stdout=subprocess.PIPE,
             timeout=15,
         )
@@ -101,7 +137,7 @@ def tap(req: TapRequest):
 
     time.sleep(random.uniform(0.01, 0.03))
     subprocess.run(
-        ["adb", "shell", "input", "tap", str(int(x)), str(int(y))], timeout=10
+        [ADB_BIN, "shell", "input", "tap", str(int(x)), str(int(y))], timeout=10
     )
     logger.info(f"👆 Tap ({int(x)}, {int(y)})")
     return {"status": "ok", "x": int(x), "y": int(y)}
@@ -119,7 +155,7 @@ def swipe(req: SwipeRequest):
 
     subprocess.run(
         [
-            "adb", "shell", "input", "swipe",
+            ADB_BIN, "shell", "input", "swipe",
             str(int(x1)), str(int(y1)),
             str(int(x2)), str(int(y2)),
             str(int(req.duration_ms)),
@@ -134,7 +170,7 @@ def swipe(req: SwipeRequest):
 def back():
     """Nhấn nút Back"""
     time.sleep(random.uniform(0.01, 0.03))
-    subprocess.run(["adb", "shell", "input", "keyevent", "BACK"], timeout=10)
+    subprocess.run([ADB_BIN, "shell", "input", "keyevent", "BACK"], timeout=10)
     logger.info("⬅️  Back")
     return {"status": "ok"}
 
@@ -143,7 +179,7 @@ def back():
 def keyevent(req: KeyEventRequest):
     """Gửi key event tùy ý"""
     subprocess.run(
-        ["adb", "shell", "input", "keyevent", req.keycode], timeout=10
+        [ADB_BIN, "shell", "input", "keyevent", req.keycode], timeout=10
     )
     logger.info(f"🔘 KeyEvent: {req.keycode}")
     return {"status": "ok"}
@@ -154,7 +190,7 @@ def screen_size():
     """Lấy kích thước màn hình"""
     try:
         result = subprocess.run(
-            ["adb", "shell", "wm", "size"],
+            [ADB_BIN, "shell", "wm", "size"],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:

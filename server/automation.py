@@ -12,8 +12,13 @@ import logging
 from collections import deque
 from enum import Enum
 
-from .engine import BotEngine
-from .config import AUTOMATION_DEFAULTS as DEFAULT_CONFIG, LOG_BUFFER_SIZE
+try:
+    from .engine import BotEngine
+    from .config import AUTOMATION_DEFAULTS as DEFAULT_CONFIG, LOG_BUFFER_SIZE
+except ImportError:
+    # Hỗ trợ import khi chạy trực tiếp file main.py
+    from engine import BotEngine
+    from config import AUTOMATION_DEFAULTS as DEFAULT_CONFIG, LOG_BUFFER_SIZE
 
 logger = logging.getLogger("automation")
 
@@ -353,7 +358,7 @@ class AutomationController:
         if has_time_wait:
             logger.info("✅ Phát hiện thời gian chờ, chờ nút xác nhận...")
         else:
-            logger.info("⏱️  Không có thời gian chờ, kiểm tra captcha...")
+            logger.info("⏱️  Không có thời gian chờ, kiểm tra error...")
 
             page_load = random.uniform(
                 self.config["page_load_delay_min"],
@@ -364,6 +369,44 @@ class AutomationController:
                 return False
 
             screen = self.engine.load_screenshot(use_cache=False, force_refresh=True)
+
+            error_threshold = self.config.get("error_threshold", 0.55)
+            back_threshold = self.config.get("back_threshold", 0.52)
+            confirm_threshold = self.config.get("confirm_threshold", 0.7)
+            wait_after_back = float(self.config.get("error_back_wait_seconds", 15))
+
+            if self.engine.check_error_state(screen_bgr=screen, threshold=error_threshold):
+                logger.warning("⚠️  Phát hiện màn hình lỗi, xử lý back...")
+
+                if not self.engine.click_back_template_center(screen_bgr=screen, threshold=back_threshold):
+                    logger.warning("⚠️  Có lỗi nhưng không click được vùng back")
+                    return False
+
+                logger.info(f"⏳ Đợi {wait_after_back:.1f}s sau khi click vùng back...")
+                for _ in range(max(1, int(wait_after_back * 10))):
+                    if self._should_stop():
+                        return False
+                    time.sleep(0.1)
+
+                self.engine.back()
+                logger.info("⬅️  Đã back về sau xử lý lỗi")
+
+                time.sleep(random.uniform(0.8, 1.3))
+                screen = self.engine.load_screenshot(use_cache=False, force_refresh=True)
+
+                logger.info("🔍 Kiểm tra nút xác nhận sau xử lý lỗi...")
+                if self.engine.check_btn_xn(screen_bgr=screen, threshold=confirm_threshold):
+                    if not self.engine.click_confirm_button(screen_bgr=screen):
+                        logger.warning("⚠️  Không click được nút xác nhận sau xử lý lỗi")
+                        return False
+
+                    logger.info("✅ Đã click nút xác nhận sau xử lý lỗi")
+                    return True
+
+                logger.warning("⚠️  Không thấy nút xác nhận sau xử lý lỗi")
+                return False
+
+            logger.info("⏱️  Không có error, kiểm tra captcha...")
 
             if self.engine.check_captra(screen, threshold=0.5):
                 logger.warning("🔒 Phát hiện CAPTCHA!")

@@ -11,14 +11,40 @@ from fastapi.responses import HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from contextlib import asynccontextmanager
 from typing import Optional
 import logging
 import os
 
-from .remote_adb import RemoteADB
-from .engine import BotEngine
-from .automation import AutomationController
-from .config import BASE_URL, AGENT_URL, TEMPLATES_DIR, API_ENDPOINTS, AUTO_START_ON_BOOT
+try:
+    from .remote_adb import RemoteADB
+    from .engine import BotEngine
+    from .automation import AutomationController
+    from .config import (
+        BASE_URL,
+        AGENT_URL,
+        TEMPLATES_DIR,
+        API_ENDPOINTS,
+        AUTO_START_ON_BOOT,
+        SERVER_HOST,
+        SERVER_PORT,
+        print_api_info,
+    )
+except ImportError:
+    # Hỗ trợ chạy trực tiếp: python server/main.py hoặc python main.py
+    from remote_adb import RemoteADB
+    from engine import BotEngine
+    from automation import AutomationController
+    from config import (
+        BASE_URL,
+        AGENT_URL,
+        TEMPLATES_DIR,
+        API_ENDPOINTS,
+        AUTO_START_ON_BOOT,
+        SERVER_HOST,
+        SERVER_PORT,
+        print_api_info,
+    )
 
 # ============================================
 # LOGGING
@@ -34,10 +60,6 @@ logger = logging.getLogger("server")
 # KHỞI TẠO
 # ============================================
 
-# URL của Local Agent — thay đổi khi deploy
-AGENT_URL = os.getenv("AGENT_URL", "http://localhost:8000")
-TEMPLATES_DIR = os.getenv("TEMPLATES_DIR", "./templates")
-
 # Tạo các instances
 adb = RemoteADB(agent_url=AGENT_URL)
 engine = BotEngine(adb=adb, templates_dir=TEMPLATES_DIR)
@@ -47,28 +69,46 @@ controller = AutomationController(engine=engine)
 # FASTAPI APP
 # ============================================
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan startup/shutdown cho FastAPI."""
+    if not AUTO_START_ON_BOOT:
+        logger.info("Auto-start đang tắt (AUTO_START_ON_BOOT=0)")
+    else:
+        health = adb.health_check()
+        if health.get("status") != "ok":
+            logger.warning(
+                f"⚠️  Không kết nối được Local Agent ({AGENT_URL}). "
+                f"Bỏ qua auto-start. Chi tiết: {health.get('error', 'unknown error')}"
+            )
+            yield
+            return
+
+        if not health.get("adb_connected", False):
+            logger.warning(
+                f"⚠️  Local Agent hoạt động nhưng chưa thấy thiết bị ADB tại {AGENT_URL}. "
+                "Bỏ qua auto-start."
+            )
+            yield
+            return
+
+        try:
+            result = controller.start()
+            if result.get("status") == "started":
+                logger.info("✅ Auto-start: automation đã bắt đầu")
+            else:
+                logger.warning(f"⚠️  Auto-start không bắt đầu được: {result}")
+        except Exception as e:
+            logger.error(f"❌ Auto-start gặp lỗi: {e}")
+
+    yield
+
 app = FastAPI(
     title="Auto Aviso - Server",
     version="1.0.0",
     description="Server điều khiển tự động hóa nhiệm vụ Aviso",
+    lifespan=lifespan,
 )
-
-
-@app.on_event("startup")
-def startup_auto_run():
-    """Tự động bắt đầu automation khi server khởi động."""
-    if not AUTO_START_ON_BOOT:
-        logger.info("Auto-start đang tắt (AUTO_START_ON_BOOT=0)")
-        return
-
-    try:
-        result = controller.start()
-        if result.get("status") == "started":
-            logger.info("✅ Auto-start: automation đã bắt đầu")
-        else:
-            logger.warning(f"⚠️  Auto-start không bắt đầu được: {result}")
-    except Exception as e:
-        logger.error(f"❌ Auto-start gặp lỗi: {e}")
 
 app.add_middleware(
     CORSMiddleware,
@@ -94,6 +134,10 @@ class ConfigUpdate(BaseModel):
     captcha_check_interval: Optional[int] = None
     page_load_delay_min: Optional[float] = None
     page_load_delay_max: Optional[float] = None
+    error_threshold: Optional[float] = None
+    back_threshold: Optional[float] = None
+    confirm_threshold: Optional[float] = None
+    error_back_wait_seconds: Optional[float] = None
 
 # ============================================
 # API ROUTES
@@ -886,7 +930,6 @@ DASHBOARD_HTML = """
 
 if __name__ == "__main__":
     import uvicorn
-    from . import print_api_info, SERVER_HOST, SERVER_PORT
 
     print_api_info()
     uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT)

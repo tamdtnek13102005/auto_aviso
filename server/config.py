@@ -27,8 +27,15 @@ AUTO_START_ON_BOOT = os.getenv("AUTO_START_ON_BOOT", "1").strip().lower() in {
 # ĐƯỜNG DẪN
 # ============================================
 
-# Thư mục chứa ảnh template (relative to working directory)
-TEMPLATES_DIR = os.getenv("TEMPLATES_DIR", "./templates")
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+# Thư mục chứa ảnh template.
+# Nếu truyền đường dẫn tương đối qua TEMPLATES_DIR, sẽ resolve theo PROJECT_ROOT.
+_raw_templates_dir = os.getenv("TEMPLATES_DIR", "templates")
+if os.path.isabs(_raw_templates_dir):
+    TEMPLATES_DIR = _raw_templates_dir
+else:
+    TEMPLATES_DIR = os.path.abspath(os.path.join(PROJECT_ROOT, _raw_templates_dir))
 
 # ============================================
 # AUTOMATION MẶC ĐỊNH
@@ -63,6 +70,12 @@ AUTOMATION_DEFAULTS = {
     "inter_action_delay_variance": 0.25,
     "retry_delay_base": 0.8,
     "retry_delay_variance": 0.3,
+
+    # Error/back recovery
+    "error_threshold": 0.55,
+    "back_threshold": 0.50,
+    "confirm_threshold": 0.7,
+    "error_back_wait_seconds": 15,
 }
 
 # ============================================
@@ -77,6 +90,8 @@ TEMPLATE_SCALES = {
     "item_nv": [0.8, 0.9, 1.0, 1.1, 1.2],
     "btn_xacnhan": [0.7, 0.8, 0.9, 1.0, 1.1, 1.2],
     "captra": [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5],
+    "error": [0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4],
+    "back": [0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4],
 }
 
 # Screenshot buffer TTL (giây) — tái sử dụng screenshot trong khoảng này

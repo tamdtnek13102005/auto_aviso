@@ -1,5 +1,11 @@
 # 🤖 Auto Aviso
 
+adb devices
+adb tcpip 5555
+adb connect 192.168.1.111:5555
+adb kill-server
+adb disconnect
+cloudflared tunnel --url http://localhost:8000
 Bot tự động hóa nhiệm vụ Aviso, kiến trúc Client-Server.
 
 ## Kiến trúc

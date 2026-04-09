@@ -9,6 +9,7 @@ import requests
 import logging
 import io
 import time
+import os
 import numpy as np
 import cv2
 from PIL import Image
@@ -27,7 +28,8 @@ class RemoteADB:
     def __init__(self, agent_url: str = "http://localhost:8000"):
         self.agent_url = agent_url.rstrip("/")
         self.session = requests.Session()
-        self.session.timeout = 15
+        self.health_timeout = float(os.getenv("AGENT_HEALTH_TIMEOUT", "12"))
+        self.request_timeout = float(os.getenv("AGENT_HTTP_TIMEOUT", "15"))
         self._screen_size_cache = None
 
     # ---- Kết nối ----
@@ -35,7 +37,7 @@ class RemoteADB:
     def health_check(self) -> dict:
         """Kiểm tra agent có sống và ADB có kết nối không"""
         try:
-            r = self.session.get(f"{self.agent_url}/api/health", timeout=5)
+            r = self.session.get(f"{self.agent_url}/api/health", timeout=self.health_timeout)
             return r.json()
         except requests.RequestException as e:
             return {"status": "error", "adb_connected": False, "error": str(e)}
@@ -43,7 +45,7 @@ class RemoteADB:
     def is_connected(self) -> bool:
         """Kiểm tra nhanh agent có sống không"""
         try:
-            r = self.session.get(f"{self.agent_url}/api/health", timeout=5)
+            r = self.session.get(f"{self.agent_url}/api/health", timeout=self.health_timeout)
             return r.status_code == 200
         except:
             return False
@@ -52,7 +54,7 @@ class RemoteADB:
 
     def screencap_bytes(self) -> bytes:
         """Chụp ảnh màn hình, trả về PNG bytes"""
-        r = self.session.get(f"{self.agent_url}/api/screenshot", timeout=15)
+        r = self.session.get(f"{self.agent_url}/api/screenshot", timeout=self.request_timeout)
         if r.status_code != 200:
             raise RuntimeError(f"Screenshot failed: {r.status_code} - {r.text}")
         return r.content
@@ -70,7 +72,7 @@ class RemoteADB:
         r = self.session.post(
             f"{self.agent_url}/api/tap",
             json={"x": int(x), "y": int(y), "randomize": randomize},
-            timeout=10,
+            timeout=self.request_timeout,
         )
         if r.status_code != 200:
             raise RuntimeError(f"Tap failed: {r.text}")
@@ -86,7 +88,7 @@ class RemoteADB:
                 "duration_ms": int(duration_ms),
                 "randomize": randomize,
             },
-            timeout=10,
+            timeout=self.request_timeout,
         )
         if r.status_code != 200:
             raise RuntimeError(f"Swipe failed: {r.text}")
@@ -94,7 +96,7 @@ class RemoteADB:
 
     def back(self):
         """Nhấn nút Back"""
-        r = self.session.post(f"{self.agent_url}/api/back", timeout=10)
+        r = self.session.post(f"{self.agent_url}/api/back", timeout=self.request_timeout)
         if r.status_code != 200:
             raise RuntimeError(f"Back failed: {r.text}")
         logger.info("⬅️  Remote back")
@@ -106,7 +108,7 @@ class RemoteADB:
         if self._screen_size_cache is not None:
             return self._screen_size_cache
 
-        r = self.session.get(f"{self.agent_url}/api/screen-size", timeout=5)
+        r = self.session.get(f"{self.agent_url}/api/screen-size", timeout=self.request_timeout)
         data = r.json()
         if "error" in data:
             raise RuntimeError(f"Screen size failed: {data['error']}")
@@ -124,7 +126,7 @@ class RemoteADB:
     def start_alert(self):
         """Phát cảnh báo captcha trên máy local"""
         try:
-            r = self.session.post(f"{self.agent_url}/api/alert/start", timeout=5)
+            r = self.session.post(f"{self.agent_url}/api/alert/start", timeout=self.request_timeout)
             return r.json()
         except Exception as e:
             logger.warning(f"Alert start failed: {e}")
@@ -132,7 +134,7 @@ class RemoteADB:
     def stop_alert(self):
         """Dừng cảnh báo trên máy local"""
         try:
-            r = self.session.post(f"{self.agent_url}/api/alert/stop", timeout=5)
+            r = self.session.post(f"{self.agent_url}/api/alert/stop", timeout=self.request_timeout)
             return r.json()
         except Exception as e:
             logger.warning(f"Alert stop failed: {e}")

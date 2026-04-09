@@ -13,8 +13,13 @@ import random
 import threading
 import logging
 
-from .remote_adb import RemoteADB
-from .config import DEFAULT_SCALES, TEMPLATE_SCALES, SCREENSHOT_BUFFER_TTL
+try:
+    from .remote_adb import RemoteADB
+    from .config import DEFAULT_SCALES, TEMPLATE_SCALES, SCREENSHOT_BUFFER_TTL
+except ImportError:
+    # Hỗ trợ import khi chạy trực tiếp file main.py
+    from remote_adb import RemoteADB
+    from config import DEFAULT_SCALES, TEMPLATE_SCALES, SCREENSHOT_BUFFER_TTL
 
 logger = logging.getLogger("engine")
 
@@ -110,6 +115,7 @@ class BotEngine:
         self.templates_dir = templates_dir
         self._cache = TemplateCache()
         self._screen = ScreenshotBuffer(adb, ttl=SCREENSHOT_BUFFER_TTL)
+        self._missing_template_groups = set()
 
     # ---- Đường dẫn template ----
 
@@ -192,9 +198,72 @@ class BotEngine:
                 debug_filename = f"debug_{os.path.basename(template_path).split('.')[0]}.png"
                 cv2.imwrite(debug_filename, debug_img)
         else:
+            if best_match:
+                top_left, w, h = best_match
+                center_x = top_left[0] + w // 2
+                center_y = top_left[1] + h // 2
+                result["confidence"] = best_val
+                result["location"] = (center_x, center_y)
+                result["bbox"] = (top_left[0], top_left[1], w, h)
+                result["scale"] = best_scale
             logger.debug(f"❌ Không tìm thấy (best_conf={best_val:.4f} < threshold={threshold})")
 
         return result
+
+    def _match_first_available_template(
+        self,
+        screen_bgr,
+        filenames,
+        threshold=0.6,
+        scales=None,
+        early_exit_conf=0.9,
+        group_name=None,
+    ) -> dict:
+        """Thử match theo danh sách template, trả về kết quả đầu tiên tìm thấy."""
+        existing_files = []
+        best_candidate = None
+
+        for filename in filenames:
+            path = self._tpl(filename)
+            if not os.path.exists(path):
+                continue
+
+            existing_files.append(filename)
+
+            result = self.match_template_multiscale(
+                screen_bgr=screen_bgr,
+                template_path=path,
+                threshold=threshold,
+                scales=scales,
+                early_exit_conf=early_exit_conf,
+            )
+            result["template_name"] = filename
+
+            if result["found"]:
+                return result
+
+            if best_candidate is None or result["confidence"] > best_candidate["confidence"]:
+                best_candidate = result
+
+        # Chỉ cảnh báo thiếu template khi thực sự không có file nào trong danh sách.
+        if not existing_files and group_name and group_name not in self._missing_template_groups:
+            logger.warning(
+                f"⚠️  Chưa có template cho nhóm '{group_name}'. "
+                f"Thêm một trong: {', '.join(filenames)}"
+            )
+            self._missing_template_groups.add(group_name)
+
+        if best_candidate is not None:
+            return best_candidate
+
+        return {
+            "found": False,
+            "confidence": 0.0,
+            "location": None,
+            "bbox": None,
+            "scale": 1.0,
+            "template_name": None,
+        }
 
     # ---- CHECK functions (chỉ kiểm tra, không click) ----
 
@@ -211,7 +280,8 @@ class BotEngine:
             logger.info(f"Nhiệm vụ đã tìm thấy! (conf={result['confidence']:.3f})")
         return result["found"]
 
-    def check_btn_xn(self, screen_bgr=None, threshold=0.7) -> bool:
+    def detect_btn_xn(self, screen_bgr=None, threshold=0.7) -> dict:
+        """Phát hiện nút xác nhận, trả về thông tin bbox/confidence."""
         if screen_bgr is None:
             screen_bgr = self.load_screenshot(use_cache=True)
 
@@ -220,6 +290,11 @@ class BotEngine:
             screen_bgr, self._tpl("btn_xacnhan.jpg"),
             threshold=threshold, scales=scales,
         )
+        result["template_name"] = "btn_xacnhan.jpg"
+        return result
+
+    def check_btn_xn(self, screen_bgr=None, threshold=0.7) -> bool:
+        result = self.detect_btn_xn(screen_bgr=screen_bgr, threshold=threshold)
         if result["found"]:
             logger.info(f"✅ Nút xác nhận tìm thấy! (conf={result['confidence']:.3f})")
         return result["found"]
@@ -237,15 +312,22 @@ class BotEngine:
             logger.info(f"✅ Nút start video tìm thấy! (conf={result['confidence']:.3f})")
         return result["found"]
 
-    def check_time_cho(self, screen_bgr=None, threshold=0.6) -> bool:
+    def detect_time_cho(self, screen_bgr=None, threshold=0.6) -> dict:
+        """Phát hiện trạng thái thời gian chờ, trả về thông tin bbox/confidence."""
         if screen_bgr is None:
             screen_bgr = self.load_screenshot(use_cache=True)
 
-        scales = TEMPLATE_SCALES.get("item_nv", DEFAULT_SCALES)
-        result = self.match_template_multiscale(
-            screen_bgr, self._tpl("time_cho.jpg"),
-            threshold=threshold, scales=scales,
+        return self._match_first_available_template(
+            screen_bgr=screen_bgr,
+            filenames=["time_cho.jpg", "time_cho.png"],
+            threshold=threshold,
+            scales=TEMPLATE_SCALES.get("item_nv", DEFAULT_SCALES),
+            early_exit_conf=0.9,
+            group_name="time_cho",
         )
+
+    def check_time_cho(self, screen_bgr=None, threshold=0.6) -> bool:
+        result = self.detect_time_cho(screen_bgr=screen_bgr, threshold=threshold)
         if result["found"]:
             logger.info(f"✅ Xác nhận đang chạy nhiệm vụ! (conf={result['confidence']:.3f})")
         return result["found"]
@@ -266,6 +348,127 @@ class BotEngine:
             logger.info(f"❌ Không thấy captcha (best_conf={result['confidence']:.3f})")
         return result["found"]
 
+    def detect_error_state(self, screen_bgr=None, threshold=0.62) -> dict:
+        """Phát hiện màn hình lỗi/nhắc xem video, trả về thông tin bbox/confidence."""
+        if screen_bgr is None:
+            screen_bgr = self.load_screenshot(use_cache=True)
+
+        candidates = [
+            "error_watch.jpg",
+            "error_watch.png",
+            "error_video.jpg",
+            "error_video.png",
+            "error.jpg",
+            "error.png",
+        ]
+
+        return self._match_first_available_template(
+            screen_bgr=screen_bgr,
+            filenames=candidates,
+            threshold=threshold,
+            scales=TEMPLATE_SCALES.get("error", DEFAULT_SCALES),
+            early_exit_conf=0.9,
+            group_name="error",
+        )
+
+    def check_error_state(self, screen_bgr=None, threshold=0.62) -> bool:
+        """Kiểm tra màn hình lỗi/nhắc xem video."""
+        result = self.detect_error_state(screen_bgr=screen_bgr, threshold=threshold)
+
+        if result["found"]:
+            logger.info(
+                f"✅ Phát hiện màn hình lỗi ({result['template_name']}, conf={result['confidence']:.3f})"
+            )
+        return result["found"]
+
+    def find_back_area(self, screen_bgr=None, threshold=0.6) -> dict:
+        """Tìm vùng nút back dựa trên template ảnh."""
+        if screen_bgr is None:
+            screen_bgr = self.load_screenshot(use_cache=True)
+
+        candidates = [
+            "back.jpg",
+            "back.png",
+            "btn_back.jpg",
+            "btn_back.png",
+            "icon_back.jpg",
+            "icon_back.png",
+        ]
+
+        result = self._match_first_available_template(
+            screen_bgr=screen_bgr,
+            filenames=candidates,
+            threshold=threshold,
+            scales=TEMPLATE_SCALES.get("back", DEFAULT_SCALES),
+            early_exit_conf=0.9,
+            group_name="back",
+        )
+
+        # Chặn false-positive kiểu thanh menu browser (rộng nhưng thấp),
+        # thường bị match nhầm khi dùng template back không chuẩn.
+        bbox = result.get("bbox")
+        if result.get("found") and bbox:
+            _x, _y, w, h = bbox
+            if h > 0:
+                aspect_ratio = float(w) / float(h)
+                if aspect_ratio >= 2.2:
+                    logger.warning(
+                        "⚠️  Bỏ qua back candidate do tỷ lệ quá dẹt "
+                        f"(w={w}, h={h}, ratio={aspect_ratio:.2f}) — có thể là menu browser"
+                    )
+                    result["found"] = False
+                    result["rejected_reason"] = "aspect_ratio"
+
+        return result
+
+    def click_back_template_center(self, screen_bgr=None, threshold=0.6, max_attempts=2) -> bool:
+        """Click vào tâm vùng ảnh back."""
+        if screen_bgr is None:
+            screen_bgr = self.load_screenshot(use_cache=True)
+
+        for attempt in range(max_attempts):
+            result = self.find_back_area(screen_bgr=screen_bgr, threshold=threshold)
+            if result["found"]:
+                click_x, click_y = result["location"]
+                self.adb.tap(click_x, click_y, randomize=True)
+                self.invalidate_screenshot()
+                logger.info(
+                    f"✅ Đã click vùng back ({result['template_name']}, conf={result['confidence']:.3f})"
+                )
+                return True
+
+            if attempt < max_attempts - 1:
+                time.sleep(random.uniform(0.1, 0.2))
+                screen_bgr = self.load_screenshot(force_refresh=True)
+
+        logger.warning("⚠️  Không tìm thấy vùng back để click")
+        return False
+
+    def detect_task_title(self, screen_bgr=None, threshold=0.6) -> dict:
+        """Phát hiện vùng tiêu đề nhiệm vụ và trả về điểm click dự kiến."""
+        if screen_bgr is None:
+            screen_bgr = self.load_screenshot(use_cache=True)
+
+        result = self._match_first_available_template(
+            screen_bgr=screen_bgr,
+            filenames=["item_nv.jpg", "item_nv_v2.jpg", "item_nv.png", "item_nv_v2.png"],
+            threshold=threshold,
+            scales=TEMPLATE_SCALES.get("item_nv", DEFAULT_SCALES),
+            early_exit_conf=0.9,
+            group_name="item_nv",
+        )
+
+        if result.get("location") and result.get("bbox"):
+            center_x, _ = result["location"]
+            bbox_x, bbox_y, _bbox_w, bbox_h = result["bbox"]
+            offset_left = 110
+            click_x = max(0, int(center_x - offset_left))
+            click_y = int(bbox_y + (bbox_h * 0.35))
+            result["click_location"] = (click_x, click_y)
+            result["task_anchor"] = (int(center_x), int(bbox_y + (bbox_h / 2)))
+
+        return result
+
     # ---- CLICK functions (tìm + click qua RemoteADB) ----
 
     def click_task_title(self, screen_bgr=None, max_attempts=2) -> bool:
@@ -277,17 +480,10 @@ class BotEngine:
 
         for attempt in range(max_attempts):
             try:
-                scales = TEMPLATE_SCALES.get("item_nv", DEFAULT_SCALES)
-                result = self.match_template_multiscale(
-                    screen_bgr, self._tpl("item_nv.jpg"),
-                    threshold=0.6, scales=scales,
-                )
+                result = self.detect_task_title(screen_bgr=screen_bgr, threshold=0.6)
 
                 if result["found"]:
-                    center_x, center_y = result["location"]
-                    offset_left = 110
-                    click_x = center_x - offset_left
-                    click_y = result["bbox"][1] + int(result["bbox"][3] * 0.35)
+                    click_x, click_y = result.get("click_location", result["location"])
 
                     logger.info(f"✅ Tiêu đề tìm thấy (conf={result['confidence']:.3f})")
                     self.adb.tap(click_x, click_y, randomize=True)
@@ -428,6 +624,25 @@ class BotEngine:
             "time_cho": ("time_cho.jpg", TEMPLATE_SCALES.get("item_nv")),
         }
 
+        optional_template_groups = {
+            "error": [
+                "error_watch.jpg",
+                "error_watch.png",
+                "error_video.jpg",
+                "error_video.png",
+                "error.jpg",
+                "error.png",
+            ],
+            "back": [
+                "back.jpg",
+                "back.png",
+                "btn_back.jpg",
+                "btn_back.png",
+                "icon_back.jpg",
+                "icon_back.png",
+            ],
+        }
+
         logger.info("🔄 Pre-loading templates...")
         for name, (filename, scales) in templates.items():
             path = self._tpl(filename)
@@ -435,4 +650,22 @@ class BotEngine:
                 self._cache.get(path, scales=scales)
             else:
                 logger.warning(f"⚠️  Template không tồn tại: {path}")
+
+        for group_name, filenames in optional_template_groups.items():
+            preloaded = False
+            for filename in filenames:
+                path = self._tpl(filename)
+                if not os.path.exists(path):
+                    continue
+
+                self._cache.get(path, scales=TEMPLATE_SCALES.get(group_name, DEFAULT_SCALES))
+                logger.info(f"✅ Optional template {group_name}: {filename}")
+                preloaded = True
+                break
+
+            if not preloaded:
+                logger.warning(
+                    f"⚠️  Chưa có template nhóm '{group_name}': {', '.join(filenames)}"
+                )
+
         logger.info("✅ Đã nạp trước tất cả templates!")
